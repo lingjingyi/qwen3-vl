@@ -57,7 +57,7 @@ class CaptionGenerator:
     def generate_single_caption(
         self,
         image_path: str,
-        prompt: str = "请为这张图片生成一个详细的描述。",
+        prompt: str = "Please provide a detailed description of this image.",
         max_new_tokens: int = 512,
         temperature: float = 0.7,
         top_p: float = 0.9,
@@ -125,7 +125,7 @@ class CaptionGenerator:
     def generate_multi_image_caption(
         self,
         image_paths: List[str],
-        prompt: str = "请描述这些图片的内容。",
+        prompt: str = "Please describe the appearance, structure, and surrounding environment of these buildings in detail.",
         max_new_tokens: int = 512,
         temperature: float = 0.7,
         top_p: float = 0.9,
@@ -192,7 +192,7 @@ class CaptionGenerator:
         samples: List[Dict],
         image_key: str = "image",
         id_key: str = "id",
-        prompt: str = "请为这张图片生成一个详细的描述。",
+        prompt: str = "Please provide a detailed description of this image.",
         max_new_tokens: int = 512,
         temperature: float = 0.7,
         top_p: float = 0.9,
@@ -280,67 +280,67 @@ def main():
         "--model_path",
         type=str,
         required=True,
-        help="模型路径"
+        help="Path to the fine-tuned model"#模型路径
     )
     parser.add_argument(
         "--input_file",
         type=str,
         required=True,
-        help="输入样本文件 (JSON 或 JSONL)"
+        help="Input sample file (JSON or JSONL)"#输入样本文件 (JSON 或 JSONL)
     )
     parser.add_argument(
         "--output_file",
         type=str,
         default="predictions.jsonl",
-        help="输出结果文件"
+        help="Output file for predictions"#输出结果文件
     )
     parser.add_argument(
         "--image_key",
         type=str,
         default="image",
-        help="图片路径在样本中的键名"
+        help="The key name for image paths in the sample"#图片路径在样本中的键名
     )
     parser.add_argument(
         "--id_key",
         type=str,
         default="id",
-        help="样本 ID 键名"
+        help="The key name for sample ID"#样本 ID 键名
     )
     parser.add_argument(
         "--prompt",
         type=str,
-        default="请为这张图片生成一个详细的描述。",
-        help="提示词"
+        default="Please provide a detailed description of this image.",
+        help="The prompt for caption generation"#提示词
     )
     parser.add_argument(
         "--max_new_tokens",
         type=int,
         default=512,
-        help="最大生成 token 数"
+        help="Maximum number of tokens to generate"
     )
     parser.add_argument(
         "--temperature",
         type=float,
         default=0.7,
-        help="温度"
+        help="Generation temperature"#温度
     )
     parser.add_argument(
         "--top_p",
         type=float,
         default=0.9,
-        help="top-p 采样"
+        help="Top-p sampling value"#top-p 采样
     )
     parser.add_argument(
         "--do_sample",
         action="store_true",
         default=True,
-        help="是否采样"
+        help="Whether to use sampling"#是否采样
     )
     parser.add_argument(
         "--device",
         type=str,
         default="cuda" if torch.cuda.is_available() else "cpu",
-        help="设备"
+        help="Device to run the model on"#设备
     )
 
     args = parser.parse_args()

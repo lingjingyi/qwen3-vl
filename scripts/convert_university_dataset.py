@@ -61,11 +61,21 @@ def load_captions_from_dataset_json(dataset_json: str):
         data = json.load(f)
     
     captions = {}
-    for item in data.get("images", []):
-        img_id = item.get("original_id", str(item.get("imgid", "")))
-        sentences = item.get("sentences", [])
-        if sentences:
-            captions[img_id] = sentences[0].get("raw", "")
+    items = data if isinstance(data, list) else []
+    
+    for item in items:
+        # 获取 ID 并格式化为 4 位字符串 (例如 "1" -> "0001")
+        raw_id = item.get("id")
+        if raw_id is None:
+            continue
+            
+        clean_id = str(raw_id).strip().zfill(4)
+        
+        # 获取描述文本 (对应你 JSON 中的 description 字段)
+        description = item.get("description", "").strip()
+        
+        if description:
+            captions[clean_id] = description
     
     return captions
 
@@ -75,7 +85,7 @@ def convert_to_qwen3vl_format(
     drone_dir: str,
     caption_file: str,
     output_file: str,
-    prompt: str = "请描述这些建筑的外观、结构和周边环境。",
+    prompt: str = "Please describe the appearance, structure, and surrounding environment of these buildings.",#请描述这些建筑的外观、结构和周边环境。
     include_satellite: bool = True,
     min_drone_images: int = 1,
     max_drone_images: int = None,
@@ -182,49 +192,49 @@ def main():
     parser.add_argument(
         "--satellite_dir",
         type=str,
-        default="/home/wangcheng/data/unversity-big-after-without-negative/university-s-train",
-        help="卫星图像目录"
+        default="/opt/data/private/qwen3-vl-master/data/university-s-train",
+        help="Directory containing satellite images"#卫星图像目录
     )
     parser.add_argument(
         "--drone_dir",
         type=str,
-        default="/home/wangcheng/data/unversity-big-after-without-negative/university-d-train-selected-5",
-        help="无人机图像目录"
+        default="/opt/data/private/qwen3-vl-master/data/university-d-train-selected-5",
+        help="Directory containing drone images"#无人机图像目录
     )
     parser.add_argument(
         "--caption_file",
         type=str,
-        default="dataset/dataset.json",
-        help="描述文本 JSON 文件"
+        default="/opt/data/private/qwen3-vl-master/qwen3-vl/dataset/output.json",
+        help="JSON file containing image captions"#描述文本 JSON 文件
     )
     parser.add_argument(
         "--output",
         type=str,
-        default="dataset/qwen3vl_train.jsonl",
-        help="输出 JSONL 文件"
+        default="/opt/data/private/qwen3-vl-master/qwen3-vl/dataset/qwen3vl_train.jsonl",
+        help="Output JSONL file"#输出 JSONL 文件(生成测试的jsonl文件)
     )
     parser.add_argument(
         "--prompt",
         type=str,
-        default="请描述这些建筑的外观、结构和周边环境。",
-        help="提示词"
+        default="Please describe the appearance, structure, and surrounding environment of these buildings.",
+        help="The prompt used for the human message"
     )
     parser.add_argument(
         "--no_satellite",
         action="store_true",
-        help="不包含卫星图像"
+        help="Do not include satellite images in the output"#不包含卫星图像
     )
     parser.add_argument(
         "--min_drone",
         type=int,
         default=1,
-        help="最少无人机图像数量"
+        help="Minimum number of drone images required per scene"#最少无人机图像数量
     )
     parser.add_argument(
         "--max_drone",
         type=int,
         default=None,
-        help="最多无人机图像数量"
+        help="Maximum number of drone images to include per scene"#最多无人机图像数量
     )
     
     args = parser.parse_args()

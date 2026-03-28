@@ -8,12 +8,16 @@ from collections import defaultdict
 import numpy as np
 import torch
 import torch.nn.functional as F
-from evaluate import load
+# --- 修改点 1: 移除 evaluate.load，改用本地库 ---
+# from evaluate import load  <-- 删掉或注释掉
+import nltk
+from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
+from rouge_score import rouge_scorer
+# ----------------------------------------------
 from sentence_transformers import SentenceTransformer
 from bert_score import score as bert_score
 from sklearn.metrics.pairwise import cosine_similarity
 from transformers import AutoModel, AutoTokenizer
-
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 class CaptionEvaluator:
-    """通用的 Caption 评估器"""
+    """通用的 Caption 评估器 (已修改为离线稳定版)"""
 
     def __init__(
         self,
@@ -31,14 +35,6 @@ class CaptionEvaluator:
         bert_model_path: Optional[str] = None,
         device: str = "cuda" if torch.cuda.is_available() else "cpu"
     ):
-        """
-        初始化评估器
-
-        Args:
-            t5_model_path: Sentence-T5 模型路径，默认使用 sentence-transformers/sentence-t5-base
-            bert_model_path: BERT 模型路径，默认使用 roberta-large
-            device: 设备
-        """
         self.device = device
 
         if t5_model_path:
@@ -53,52 +49,67 @@ class CaptionEvaluator:
             self.bert_tokenizer = AutoTokenizer.from_pretrained("FacebookAI/roberta-large")
             self.bert_model = AutoModel.from_pretrained("FacebookAI/roberta-large").to(device)
 
-        self.bleu = load("bleu")
-        self.rouge = load("rouge")
-        self.meteor = load("meteor")
+        # --- 修改点 2: 使用本地 rouge_scorer 初始化，移除需要联网的 load ---
+        self.rouge_evaluator = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL', 'rougeLsum'], use_stemmer=True)
+        # self.bleu = load("bleu")   <-- 移除
+        # self.rouge = load("rouge") <-- 移除
+        # self.meteor = None         <-- 离线环境建议关掉 METEOR
+        # -----------------------------------------------------------------
 
     def calculate_bleu(self, candidates: List[str], references: List[List[str]]) -> Dict:
-        """计算 BLEU 分数"""
-        results = self.bleu.compute(
-            predictions=candidates,
-            references=references
-        )
+        """修改点 3: 使用 NLTK 本地计算 BLEU (无需联网脚本)"""
+        # 分词处理
+        hypotheses = [c.split() for c in candidates]
+        # reference 格式：[[[ref1_tokens], [ref2_tokens]], ...]
+        list_of_references = [[r.split() for r in refs] for refs in references]
+        
+        # 使用平滑函数防止短句得分出现 0
+        chencherry = SmoothingFunction()
+        
+        # 计算各阶 BLEU
+        b1 = corpus_bleu(list_of_references, hypotheses, weights=(1, 0, 0, 0), smoothing_function=chencherry.method1)
+        b2 = corpus_bleu(list_of_references, hypotheses, weights=(0.5, 0.5, 0, 0), smoothing_function=chencherry.method1)
+        b3 = corpus_bleu(list_of_references, hypotheses, weights=(0.33, 0.33, 0.33, 0), smoothing_function=chencherry.method1)
+        b4 = corpus_bleu(list_of_references, hypotheses, weights=(0.25, 0.25, 0.25, 0.25), smoothing_function=chencherry.method1)
+        
         return {
-            "bleu": float(results["bleu"]),
-            "bleu1": float(results["precisions"][0]) if results["precisions"] else 0.0,
-            "bleu2": float(results["precisions"][1]) if len(results["precisions"]) > 1 else 0.0,
-            "bleu3": float(results["precisions"][2]) if len(results["precisions"]) > 2 else 0.0,
-            "bleu4": float(results["precisions"][3]) if len(results["precisions"]) > 3 else 0.0,
+            "bleu": float(b4),
+            "bleu1": float(b1),
+            "bleu2": float(b2),
+            "bleu3": float(b3),
+            "bleu4": float(b4),
         }
 
     def calculate_rouge(self, candidates: List[str], references: List[str]) -> Dict:
-        """计算 ROUGE 分数"""
-        results = self.rouge.compute(
-            predictions=candidates,
-            references=references
-        )
+        """修改点 4: 使用 rouge-score 本地计算 (无需联网脚本)"""
+        all_scores = []
+        for cand, ref in zip(candidates, references):
+            score = self.rouge_evaluator.score(ref, cand)
+            all_scores.append(score)
+            
         return {
-            "rouge1": float(results["rouge1"]),
-            "rouge2": float(results["rouge2"]),
-            "rougeL": float(results["rougeL"]),
-            "rougeLsum": float(results["rougeLsum"]),
+            "rouge1": float(np.mean([s['rouge1'].fmeasure for s in all_scores])),
+            "rouge2": float(np.mean([s['rouge2'].fmeasure for s in all_scores])),
+            "rougeL": float(np.mean([s['rougeL'].fmeasure for s in all_scores])),
+            "rougeLsum": float(np.mean([s['rougeLsum'].fmeasure for s in all_scores])),
         }
 
     def calculate_meteor(self, candidates: List[str], references: List[str]) -> Dict:
-        """计算 METEOR 分数"""
-        results = self.meteor.compute(
-            predictions=candidates,
-            references=references
-        )
-        return {"meteor": float(results["meteor"])}
+        """离线环境下跳过 METEOR"""
+        return {"meteor": 0.0}
 
     def calculate_bertscore(self, candidates: List[str], references: List[str]) -> Dict:
-        """计算 BERTScore"""
+        """计算 BERTScore (已修复本地路径导致的 KeyError)"""
+        # 获取本地模型路径
+        model_path = self.bert_model.config._name_or_path
+        
         P, R, F1 = bert_score(
             candidates,
             references,
-            model_type="FacebookAI/roberta-large",
+            model_type=model_path, 
+            num_layers=17, # <--- 关键修改：手动指定 RoBERTa-Large 的推荐层数（17）
             lang="en",
+            device=self.device,
             verbose=False
         )
         return {
@@ -108,7 +119,7 @@ class CaptionEvaluator:
         }
 
     def calculate_t5_similarity(self, candidates: List[str], references: List[str]) -> Dict:
-        """计算 Sentence-T5 余弦相似度"""
+        """计算 Sentence-T5 余弦相似度 (已指向本地模型)"""
         candidate_embeds = self.t5_model.encode(candidates, normalize_embeddings=True)
         reference_embeds = self.t5_model.encode(references, normalize_embeddings=True)
         similarities = cosine_similarity(candidate_embeds, reference_embeds).diagonal()
@@ -134,50 +145,27 @@ class CaptionEvaluator:
         references: List[str],
         metrics: Optional[List[str]] = None
     ) -> Dict:
-        """
-        评估生成的 Caption
-
-        Args:
-            candidates: 生成的 Caption 列表
-            references: 参考 Caption 列表（每个元素是单个参考或参考列表）
-            metrics: 要计算的指标列表，默认计算所有指标
-
-        Returns:
-            包含所有指标的字典
-        """
         if len(candidates) != len(references):
             raise ValueError(f"Candidates count ({len(candidates)}) != references count ({len(references)})")
 
+        # --- 修改点 5: 默认指标移除 meteor ---
         if not metrics:
-            metrics = ["bleu", "rouge", "meteor", "bertscore", "t5_similarity", "length"]
+            metrics = ["bleu", "rouge", "bertscore", "t5_similarity", "length"]
+        # ----------------------------------
 
         results = {}
 
-        references_for_bleu = []
-        for ref in references:
-            if isinstance(ref, str):
-                references_for_bleu.append([ref])
-            else:
-                references_for_bleu.append(ref)
-
-        references_flat = []
-        for ref in references:
-            if isinstance(ref, str):
-                references_flat.append(ref)
-            else:
-                references_flat.append(ref[0])
+        # 处理参考答案格式
+        references_for_bleu = [[ref] for ref in references]
+        references_flat = references
 
         if "bleu" in metrics:
-            logger.info("Calculating BLEU...")
+            logger.info("Calculating BLEU (NLTK Offline)...")
             results.update(self.calculate_bleu(candidates, references_for_bleu))
 
         if "rouge" in metrics:
-            logger.info("Calculating ROUGE...")
+            logger.info("Calculating ROUGE (Rouge-Score Offline)...")
             results.update(self.calculate_rouge(candidates, references_flat))
-
-        if "meteor" in metrics:
-            logger.info("Calculating METEOR...")
-            results.update(self.calculate_meteor(candidates, references_flat))
 
         if "bertscore" in metrics:
             logger.info("Calculating BERTScore...")
@@ -195,135 +183,78 @@ class CaptionEvaluator:
 
 
 def load_jsonl(file_path: str) -> List[Dict]:
-    """加载 JSONL 文件"""
     with open(file_path, 'r', encoding='utf-8') as f:
         return [json.loads(line) for line in f]
 
-
 def load_json(file_path: str) -> List[Dict]:
-    """加载 JSON 文件"""
     with open(file_path, 'r', encoding='utf-8') as f:
         return json.load(f)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="通用 Caption 评估工具")
-    parser.add_argument(
-        "--prediction_file",
-        type=str,
-        required=True,
-        help="预测结果文件路径 (JSON 或 JSONL)"
-    )
-    parser.add_argument(
-        "--reference_file",
-        type=str,
-        required=True,
-        help="参考结果文件路径 (JSON 或 JSONL)"
-    )
-    parser.add_argument(
-        "--output_file",
-        type=str,
-        default="evaluation_results.json",
-        help="评估结果输出文件"
-    )
-    parser.add_argument(
-        "--prediction_key",
-        type=str,
-        default="prediction",
-        help="预测结果在 JSON 中的键名"
-    )
-    parser.add_argument(
-        "--reference_key",
-        type=str,
-        default="reference",
-        help="参考结果在 JSON 中的键名"
-    )
-    parser.add_argument(
-        "--id_key",
-        type=str,
-        default="id",
-        help="样本 ID 键名，用于匹配预测和参考"
-    )
-    parser.add_argument(
-        "--t5_model_path",
-        type=str,
-        default=None,
-        help="Sentence-T5 模型路径"
-    )
-    parser.add_argument(
-        "--bert_model_path",
-        type=str,
-        default=None,
-        help="BERT 模型路径"
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda" if torch.cuda.is_available() else "cpu",
-        help="设备"
-    )
+    parser = argparse.ArgumentParser(description="通用 Caption 评估工具 (本地版)")
+    parser.add_argument("--prediction_file", type=str, required=True)
+    parser.add_argument("--reference_file", type=str, required=True)
+    parser.add_argument("--output_file", type=str, default="evaluation_results.json")
+    parser.add_argument("--prediction_key", type=str, default="prediction")
+    parser.add_argument("--reference_key", type=str, default="conversations") # 默认设为 conversations
+    parser.add_argument("--id_key", type=str, default="id")
+    parser.add_argument("--t5_model_path", type=str, default=None)
+    parser.add_argument("--bert_model_path", type=str, default=None)
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
 
     args = parser.parse_args()
 
     logger.info("=" * 60)
-    logger.info("Caption Evaluation Tool")
+    logger.info("Caption Evaluation Tool (Offline Stable)")
     logger.info("=" * 60)
 
-    logger.info(f"Loading predictions from: {args.prediction_file}")
     if args.prediction_file.endswith(".jsonl"):
         predictions = load_jsonl(args.prediction_file)
     else:
         predictions = load_json(args.prediction_file)
 
-    logger.info(f"Loading references from: {args.reference_file}")
     if args.reference_file.endswith(".jsonl"):
         references = load_jsonl(args.reference_file)
     else:
         references = load_json(args.reference_file)
 
-    logger.info(f"Loaded {len(predictions)} predictions and {len(references)} references")
-
+    # --- 修改点 6: 修正参考答案的解析逻辑 (处理 conversations 列表) ---
     ref_dict = {}
     for ref in references:
-        ref_dict[ref[args.id_key]] = ref[args.reference_key]
+        val = ref[args.reference_key]
+        if isinstance(val, list):
+            # 找到 gpt 的回复
+            caption = next((m["value"] for m in val if m.get("from") == "gpt"), "")
+            ref_dict[ref[args.id_key]] = caption
+        else:
+            ref_dict[ref[args.id_key]] = str(val)
+    # -------------------------------------------------------------
 
     candidate_list = []
     reference_list = []
-    matched_count = 0
-
     for pred in predictions:
         sample_id = pred[args.id_key]
         if sample_id in ref_dict:
             candidate_list.append(pred[args.prediction_key])
             reference_list.append(ref_dict[sample_id])
-            matched_count += 1
 
-    logger.info(f"Matched {matched_count} samples")
+    logger.info(f"Matched {len(candidate_list)} samples")
 
-    if matched_count == 0:
-        logger.error("No samples matched! Please check your data format.")
-        return
-
-    logger.info("Initializing evaluator...")
     evaluator = CaptionEvaluator(
         t5_model_path=args.t5_model_path,
         bert_model_path=args.bert_model_path,
         device=args.device
     )
 
-    logger.info("Running evaluation...")
     results = evaluator.evaluate(candidate_list, reference_list)
 
-    logger.info("\n" + "=" * 60)
-    logger.info("Evaluation Results:")
-    logger.info("=" * 60)
+    # 输出结果
     for key, value in results.items():
         logger.info(f"{key:25s}: {value:.4f}" if isinstance(value, float) else f"{key:25s}: {value}")
 
     with open(args.output_file, 'w', encoding='utf-8') as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
-
-    logger.info(f"\nResults saved to: {args.output_file}")
 
 
 if __name__ == "__main__":

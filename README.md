@@ -178,11 +178,11 @@ python inference/generate_caption.py \
 cd /opt/data/private/qwen3-vl-master/qwen3-vl/  # 回到项目根目录
 python inference/generate_caption.py \
     --model_path /opt/data/private/qwen3-vl-master/qwen3-vl/checkpoints/qwen3vl_caption/merged_model \
-    --input_file /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/dataset_train.jsonl \
+    --input_file /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/qwen3vl_train.jsonl \
     --output_file /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/predictions.jsonl \
-    --image_key image \
+    --image_key images \
     --id_key id \
-    --prompt "请为这张图片生成一个详细的描述。" \
+    --prompt "Please generate a detailed description for this picture." \
     --max_new_tokens 512
 
 ### 单张图片推理代码
@@ -236,6 +236,17 @@ python evaluation/evaluate_caption.py \
     --reference_key reference \
     --id_key id
 ```
+python evaluation/evaluate_caption.py \
+    --prediction_file /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/predictions.jsonl \
+    --reference_file /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/qwen3vl_train.jsonl \
+    --prediction_key prediction \
+    --reference_key conversations \
+    --id_key id \
+    --t5_model_path /opt/data/private/qwen3-vl-master/qwen3-vl/pretrained/sentence-t5-base \
+    --bert_model_path /opt/data/private/qwen3-vl-master/qwen3-vl/pretrained/roberta-large \
+    --output_file /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/evaluation_results.json
+    
+缺失库需要安装：pip install nltk rouge_score sentence-transformers bert_score -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 ### 评估指标
 
