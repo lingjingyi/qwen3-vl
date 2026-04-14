@@ -86,8 +86,8 @@ python mydataset/format_caption_into_training_json.py \
     --input your_data.json \
     --output your_data.jsonl
 ```
-python qwen3-vl/mydataset/format_caption_into_training_json.py \
-    --input /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/output.json \
+python qwen3-vl/mydataset/format_caption_into_training_json2.py \
+    --input /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/train_dataset2.json \
     --output /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/dataset_train.jsonl
 
 ### 2. 注册数据集
@@ -115,6 +115,8 @@ data_dict = {
 
 ### 4. 启动训练
 
+pip install peft
+pip install peft accelerate bitsandbytes
 ```bash
 cd qwen3-vl
 chmod +x scripts/sft.sh
@@ -178,12 +180,21 @@ python inference/generate_caption.py \
 cd /opt/data/private/qwen3-vl-master/qwen3-vl/  # 回到项目根目录
 python inference/generate_caption.py \
     --model_path /opt/data/private/qwen3-vl-master/qwen3-vl/checkpoints/qwen3vl_caption/merged_model \
-    --input_file /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/qwen3vl_train.jsonl \
+    --input_file /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/test_dataset.jsonl \
     --output_file /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/predictions.jsonl \
     --image_key images \
     --id_key id \
     --prompt "Please generate a detailed description for this picture." \
     --max_new_tokens 512
+
+python inference/generate_caption.py \
+    --model_path /opt/data/private/qwen3-vl-master/qwen3-vl/checkpoints/qwen3vl_caption/merged_model \
+    --input_file /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/test_dataset.jsonl \
+    --output_file /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/predictions.jsonl \
+    --num_beams 8 \
+    --length_penalty 1.2 \
+    --min_new_tokens 40 \
+    --max_new_tokens 100
 
 ### 单张图片推理代码
 
@@ -236,17 +247,12 @@ python evaluation/evaluate_caption.py \
     --reference_key reference \
     --id_key id
 ```
-python evaluation/evaluate_caption.py \
-    --prediction_file /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/predictions.jsonl \
-    --reference_file /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/qwen3vl_train.jsonl \
-    --prediction_key prediction \
-    --reference_key conversations \
-    --id_key id \
-    --t5_model_path /opt/data/private/qwen3-vl-master/qwen3-vl/pretrained/sentence-t5-base \
-    --bert_model_path /opt/data/private/qwen3-vl-master/qwen3-vl/pretrained/roberta-large \
-    --output_file /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/evaluation_results.json
     
 缺失库需要安装：pip install nltk rouge_score sentence-transformers bert_score -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+python evaluation/evaluate_caption.py \
+    --prediction_file /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/predictions.jsonl \
+    --output_file /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/evaluation_results.json 
 
 ### 评估指标
 

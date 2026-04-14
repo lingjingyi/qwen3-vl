@@ -1,8 +1,8 @@
 import json
 import os
 
-INPUT_JSON  = "/opt/data/private/qwen3-vl-master/qwen3-vl/dataset/dataset.json"   # 修改为你的输入文件路径
-OUTPUT_JSON = "/opt/data/private/qwen3-vl-master/qwen3-vl/dataset/output.json"  # 输出文件路径
+INPUT_JSON  = "/opt/data/private/qwen3-vl-master/qwen3-vl/dataset/dataset_train2.json"   # 修改为你的输入文件路径
+OUTPUT_JSON = "/opt/data/private/qwen3-vl-master/qwen3-vl/dataset/train2.json"  # 输出文件路径
 DRONE_BASE  = "/opt/data/private/qwen3-vl-master/data/university-d-train-selected-5"
 # ========== 关键修改1：添加卫星图实际基础路径 ==========
 SATELLITE_BASE = "/opt/data/private/qwen3-vl-master/data/university-s-train/"

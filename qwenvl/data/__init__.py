@@ -9,7 +9,7 @@ import re
 """
 
 UNIVERSITY_CROSSVIEW_DATASET = {
-    "annotation_path": "/opt/data/private/qwen3-vl-master/qwen3-vl/dataset/dataset_train.jsonl",
+    "annotation_path": "/opt/data/private/qwen3-vl-master/qwen3-vl/dataset/train_dataset.jsonl",
     "data_path": "",  # 标注文件中已使用绝对路径
 }
 
@@ -19,7 +19,7 @@ YOUR_CAPTION_DATASET = {
 }
 
 data_dict = {
-    "dataset_train": UNIVERSITY_CROSSVIEW_DATASET,
+    "train_dataset": UNIVERSITY_CROSSVIEW_DATASET,
     "university_crossview": UNIVERSITY_CROSSVIEW_DATASET,
     "your_caption_dataset": YOUR_CAPTION_DATASET,
 }

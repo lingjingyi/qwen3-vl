@@ -16,8 +16,7 @@ import qwenvl.train.trainer
 from trainer import replace_qwen2_vl_attention_class
 
 from transformers import (
-    Qwen2VLForConditionalGeneration,
-    Qwen2_5_VLForConditionalGeneration,
+    Qwen3VLForConditionalGeneration,
     TrainerCallback,
     TrainerState,
     TrainerControl,
@@ -29,7 +28,7 @@ from qwenvl.train.argument import (
     DataArguments,
     TrainingArguments,
 )
-from transformers import AutoTokenizer, AutoProcessor, Qwen2VLImageProcessor, Trainer
+from transformers import AutoTokenizer, AutoProcessor, Trainer
 
 local_rank = None
 TRAINABLE_KEYWORDS = ["merger", "patch_merger", "deepstack_merger", "lora_"]
@@ -41,7 +40,7 @@ def rank0_print(*args):
 
 
 def get_visual_module(model):
-    """兼容 Qwen2-VL / Qwen3-VL / DeepSpeed / PEFT 包装"""
+    """兼容 Qwen3-VL / DeepSpeed / PEFT 包装"""
     m = model
     if hasattr(m, 'base_model'):
         m = m.base_model
@@ -57,8 +56,24 @@ def get_visual_module(model):
         raise AttributeError(f"Cannot find visual module in {type(m).__name__}")
 
 
+# ══════════════════════════════════════════════════════════════════════
+# GradientDebugCallback：修复 norm.weight 误报
+#
+# 原问题：LayerNorm weight（γ）初始值为 1.0，前几步梯度极小，
+#   绝对差值 < 1e-9 被误判为"未更新"，实际上是正常现象。
+#
+# 修复方案：改用相对阈值 max(1e-9, 1e-7 × |初始值均值|)
+#   - 对普通参数（初始值接近 0）：阈值仍约 1e-9，行为不变
+#   - 对 norm.weight（初始值 ≈ 1.0）：阈值放宽至 1e-7，消除误报
+#   - 对 norm.bias（初始值 = 0）：阈值仍约 1e-9，行为不变
+# ══════════════════════════════════════════════════════════════════════
 class GradientDebugCallback(TrainerCallback):
-    """3步后检查可训练参数是否有变化"""
+    """3步后检查可训练参数是否有变化（使用相对阈值，消除 norm.weight 误报）"""
+
+    # 相对阈值系数：阈值 = max(ABS_FLOOR, REL_SCALE × |初始值均值|)
+    ABS_FLOOR  = 1e-9   # 绝对下限，防止初始值为 0 时除零
+    REL_SCALE  = 1e-7   # 相对系数，对 norm.weight(≈1.0) 阈值 ≈ 1e-7
+
     def __init__(self, model):
         self.model = model
         self.checked = False
@@ -77,6 +92,17 @@ class GradientDebugCallback(TrainerCallback):
                 count += 1
         print(f"[GradCheck] 记录了 {count} 个可训练参数初始值")
 
+    def _threshold(self, name: str) -> float:
+        """
+        根据参数初始值大小动态决定判断阈值。
+        norm.weight 初始值为 1.0，使用相对阈值 1e-7；
+        其他参数初始值接近 0，退化为绝对阈值 1e-9。
+        """
+        if name not in self.initial_params:
+            return self.ABS_FLOOR
+        init_magnitude = self.initial_params[name].abs().mean().item()
+        return max(self.ABS_FLOOR, self.REL_SCALE * init_magnitude)
+
     def on_step_end(self, args, state, control, **kwargs):
         if self.checked or args.local_rank not in (-1, 0):
             return
@@ -90,13 +116,15 @@ class GradientDebugCallback(TrainerCallback):
 
         print("\n[GradCheck] === 参数变化量检查（3 步后）===")
         changed, unchanged = [], []
+
         for n, p in m.named_parameters():
             if p.requires_grad and n in self.initial_params:
-                diff = (p.detach().cpu() - self.initial_params[n]).abs().max().item()
-                if diff > 1e-9:
-                    changed.append(f"  ✅ {n}: max_diff={diff:.2e}")
+                diff      = (p.detach().cpu() - self.initial_params[n]).abs().max().item()
+                threshold = self._threshold(n)
+                if diff > threshold:
+                    changed.append(f"  ✅ {n}: max_diff={diff:.2e} (threshold={threshold:.2e})")
                 else:
-                    unchanged.append(f"  ❌ {n}: max_diff={diff:.2e}")
+                    unchanged.append(f"  ❌ {n}: max_diff={diff:.2e} (threshold={threshold:.2e})")
 
         for line in changed[:5]:
             print(line)
@@ -124,7 +152,7 @@ def set_model(model_args, model):
     print(f"[DEBUG] hasattr(visual, 'merger')={hasattr(visual, 'merger')}")
     print(f"[DEBUG] visual type={type(visual)}")
 
-    # ── 第1步：处理 LLM ──────────────────────────────────────────────────────
+    # ── 第1步：处理 LLM ──────────────────────────────────────────────
     if model_args.tune_mm_llm:
         for n, p in model.model.named_parameters():
             p.requires_grad = True
@@ -138,9 +166,7 @@ def set_model(model_args, model):
             for p in model.lm_head.parameters():
                 p.requires_grad = False
 
-    # ── 第2步：处理视觉编码器（全部冻结）────────────────────────────────────
-    # 注：Qwen3-VL 内部用 in-place scatter 插入视觉特征，梯度路径在此截断，
-    # 解冻视觉 block 无实际效果（两次实验 loss 差异 < 0.003），故保持全部冻结。
+    # ── 第2步：处理视觉编码器 ────────────────────────────────────────
     if model_args.tune_mm_vision:
         for n, p in visual.named_parameters():
             p.requires_grad = True
@@ -148,7 +174,7 @@ def set_model(model_args, model):
         for n, p in visual.named_parameters():
             p.requires_grad = False
 
-    # ── 第3步：解冻 merger（最后执行，保证优先级最高）────────────────────────
+    # ── 第3步：解冻 merger（最后执行，保证优先级最高）────────────────
     merger = None
     if hasattr(visual, 'merger'):
         merger = visual.merger
@@ -187,7 +213,7 @@ def apply_lora(model_args, model):
     rank0_print("=== LoRA 可训练参数统计 ===")
     model.print_trainable_parameters()
 
-    # get_peft_model 后重新确保 merger 可训练（PEFT 可能重置 requires_grad）
+    # get_peft_model 后重新确保 merger 可训练
     visual = get_visual_module(model)
     merger = None
     if hasattr(visual, 'merger'):
@@ -220,56 +246,31 @@ def train(attn_implementation="flash_attention_2"):
     local_rank = training_args.local_rank
     os.makedirs(training_args.output_dir, exist_ok=True)
 
+    # ── 加载 Qwen3-VL ────────────────────────────────────────────────
     try:
         from transformers import Qwen3VLForConditionalGeneration
-        qwen3_available = True
     except ImportError:
-        qwen3_available = False
+        raise ImportError(
+            "当前 transformers 不支持 Qwen3VLForConditionalGeneration，"
+            "请升级：pip install 'transformers>=4.52.0'"
+        )
 
-    model_path_lower = model_args.model_name_or_path.lower()
-
-    if qwen3_available and "qwen3" in model_path_lower:
-        rank0_print("Loading Qwen3-VL model...")
-        model = Qwen3VLForConditionalGeneration.from_pretrained(
-            model_args.model_name_or_path,
-            cache_dir=training_args.cache_dir,
-            attn_implementation=attn_implementation,
-            torch_dtype=(torch.bfloat16 if training_args.bf16 else None),
-        )
-        data_args.image_processor = AutoProcessor.from_pretrained(
-            model_args.model_name_or_path,
-        ).image_processor
-        data_args.model_type = "qwen3vl"
-    elif "qwen2.5" in model_path_lower or "RSCCM" in model_path_lower:
-        rank0_print("Loading Qwen2.5-VL model...")
-        model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            model_args.model_name_or_path,
-            cache_dir=training_args.cache_dir,
-            attn_implementation=attn_implementation,
-            torch_dtype=(torch.bfloat16 if training_args.bf16 else None),
-        )
-        data_args.image_processor = AutoProcessor.from_pretrained(
-            model_args.model_name_or_path,
-        ).image_processor
-        data_args.model_type = "qwen2.5vl"
-    else:
-        rank0_print("Loading Qwen2-VL model...")
-        model = Qwen2VLForConditionalGeneration.from_pretrained(
-            model_args.model_name_or_path,
-            cache_dir=training_args.cache_dir,
-            attn_implementation=attn_implementation,
-            torch_dtype=(torch.bfloat16 if training_args.bf16 else None),
-        )
-        data_args.image_processor = Qwen2VLImageProcessor.from_pretrained(
-            model_args.model_name_or_path,
-        )
-        data_args.model_type = "qwen2vl"
+    rank0_print("Loading Qwen3-VL model...")
+    model = Qwen3VLForConditionalGeneration.from_pretrained(
+        model_args.model_name_or_path,
+        cache_dir=training_args.cache_dir,
+        attn_implementation=attn_implementation,
+        torch_dtype=(torch.bfloat16 if training_args.bf16 else None),
+    )
+    data_args.image_processor = AutoProcessor.from_pretrained(
+        model_args.model_name_or_path,
+    ).image_processor
+    data_args.model_type = "qwen3vl"
 
     if data_args.data_flatten:
         replace_qwen2_vl_attention_class()
     model.config.use_cache = False
 
-    # 无条件注册：确保冻结层存在时计算图仍然连通
     if hasattr(model, "enable_input_require_grads"):
         model.enable_input_require_grads()
     else:
@@ -301,7 +302,10 @@ def train(attn_implementation="flash_attention_2"):
 
     # 验证可训练参数
     if torch.distributed.get_rank() == 0:
-        trainable = [(n, p.shape, p.numel()) for n, p in model.named_parameters() if p.requires_grad]
+        trainable = [
+            (n, p.shape, p.numel())
+            for n, p in model.named_parameters() if p.requires_grad
+        ]
         total_trainable = sum(x[2] for x in trainable)
 
         lora_params   = [(n, s, c) for n, s, c in trainable if 'lora_' in n]
@@ -333,14 +337,14 @@ def train(attn_implementation="flash_attention_2"):
         **data_module,
     )
 
-    # 验证 checkpoint 完整性（同时检查 scheduler.pt，避免 OOM 后残缺 checkpoint 误判）
+    # 验证 checkpoint 完整性
     def is_valid_checkpoint(ckpt_path):
         has_state     = (ckpt_path / "trainer_state.json").exists()
         has_ds_latest = (ckpt_path / "latest").exists()
         has_scheduler = (ckpt_path / "scheduler.pt").exists()
         return has_state and has_ds_latest and has_scheduler
 
-    checkpoints = sorted(pathlib.Path(training_args.output_dir).glob("checkpoint-*"))
+    checkpoints       = sorted(pathlib.Path(training_args.output_dir).glob("checkpoint-*"))
     valid_checkpoints = [p for p in checkpoints if is_valid_checkpoint(p)]
 
     if valid_checkpoints:
@@ -357,22 +361,19 @@ def train(attn_implementation="flash_attention_2"):
     trainer.save_state()
     data_args.image_processor.save_pretrained(training_args.output_dir)
 
-    source_path = os.path.join(model_args.model_name_or_path, "chat_template.json")
+    source_path   = os.path.join(model_args.model_name_or_path, "chat_template.json")
     template_path = os.path.join(training_args.output_dir, "chat_template.json")
     shutil.copy2(source_path, template_path)
 
-    # ── 保存 LoRA adapter 并在 GPU 上直接合并为完整模型 ──────────────────────
+    # ── 保存 LoRA adapter 并合并为完整模型 ──────────────────────────
     if use_lora and training_args.local_rank in (-1, 0):
-        # 1. 保存原始 LoRA adapter（备用）
         lora_save_path = os.path.join(training_args.output_dir, "lora_adapter")
         model.save_pretrained(lora_save_path)
         rank0_print(f"[INFO] LoRA adapter saved to {lora_save_path}")
 
-        # 2. 在 GPU 上直接 merge，无需二次加载，不占额外内存
         rank0_print("[INFO] Merging LoRA weights into base model (on GPU)...")
         merged_model = model.merge_and_unload()
 
-        # 3. 保存合并后的完整模型（可直接用于推理）
         merged_save_path = os.path.join(training_args.output_dir, "merged_model")
         merged_model.save_pretrained(merged_save_path)
         tokenizer.save_pretrained(merged_save_path)

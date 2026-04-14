@@ -1,23 +1,20 @@
+"""
+Caption 评估脚本
+指标：BLEU-1/2/3/4, METEOR, ROUGE-L, CIDEr, SPICE
+"""
 import json
 import logging
-import os
 import argparse
 from typing import Dict, List, Optional
 from collections import defaultdict
 
 import numpy as np
-import torch
-import torch.nn.functional as F
-# --- 修改点 1: 移除 evaluate.load，改用本地库 ---
-# from evaluate import load  <-- 删掉或注释掉
 import nltk
 from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
+from nltk.translate.meteor_score import meteor_score
 from rouge_score import rouge_scorer
-# ----------------------------------------------
-from sentence_transformers import SentenceTransformer
-from bert_score import score as bert_score
-from sklearn.metrics.pairwise import cosine_similarity
-from transformers import AutoModel, AutoTokenizer
+from pycocoevalcap.cider.cider import Cider
+from pycocoevalcap.spice.spice import Spice
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,236 +22,256 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+for pkg in ['punkt', 'wordnet', 'omw-1.4']:
+    try:
+        nltk.data.find(f'tokenizers/{pkg}' if pkg == 'punkt' else f'corpora/{pkg}')
+    except LookupError:
+        nltk.download(pkg)
+
+
+def _to_coco_fmt(candidates: List[str], references: List[List[str]]):
+    gts = {i: refs            for i, refs in enumerate(references)}
+    res = {i: [candidates[i]] for i in range(len(candidates))}
+    return gts, res
+
+
+# ── 修复：自定义 JSON encoder，保留小数点后四位 ────────────────────────
+class RoundedFloatEncoder(json.JSONEncoder):
+    """
+    将所有 float 值四舍五入到小数点后四位再序列化。
+    json.dump 默认输出完整精度（如 0.7450123456789012），
+    此 encoder 保证输出为 0.7450，与控制台打印格式一致。
+    """
+    DECIMAL_PLACES = 4
+
+    def iterencode(self, obj, _one_shot=False):
+        # 递归处理，保证嵌套结构中的 float 也被处理
+        return super().iterencode(self._round(obj), _one_shot)
+
+    def _round(self, obj):
+        if isinstance(obj, float):
+            return round(obj, self.DECIMAL_PLACES)
+        if isinstance(obj, dict):
+            return {k: self._round(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [self._round(v) for v in obj]
+        return obj
+
 
 class CaptionEvaluator:
-    """通用的 Caption 评估器 (已修改为离线稳定版)"""
 
-    def __init__(
-        self,
-        t5_model_path: Optional[str] = None,
-        bert_model_path: Optional[str] = None,
-        device: str = "cuda" if torch.cuda.is_available() else "cpu"
-    ):
-        self.device = device
-
-        if t5_model_path:
-            self.t5_model = SentenceTransformer(t5_model_path, device=device)
-        else:
-            self.t5_model = SentenceTransformer("sentence-transformers/sentence-t5-base", device=device)
-
-        if bert_model_path:
-            self.bert_tokenizer = AutoTokenizer.from_pretrained(bert_model_path)
-            self.bert_model = AutoModel.from_pretrained(bert_model_path).to(device)
-        else:
-            self.bert_tokenizer = AutoTokenizer.from_pretrained("FacebookAI/roberta-large")
-            self.bert_model = AutoModel.from_pretrained("FacebookAI/roberta-large").to(device)
-
-        # --- 修改点 2: 使用本地 rouge_scorer 初始化，移除需要联网的 load ---
-        self.rouge_evaluator = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL', 'rougeLsum'], use_stemmer=True)
-        # self.bleu = load("bleu")   <-- 移除
-        # self.rouge = load("rouge") <-- 移除
-        # self.meteor = None         <-- 离线环境建议关掉 METEOR
-        # -----------------------------------------------------------------
-
-    def calculate_bleu(self, candidates: List[str], references: List[List[str]]) -> Dict:
-        """修改点 3: 使用 NLTK 本地计算 BLEU (无需联网脚本)"""
-        # 分词处理
-        hypotheses = [c.split() for c in candidates]
-        # reference 格式：[[[ref1_tokens], [ref2_tokens]], ...]
-        list_of_references = [[r.split() for r in refs] for refs in references]
-        
-        # 使用平滑函数防止短句得分出现 0
-        chencherry = SmoothingFunction()
-        
-        # 计算各阶 BLEU
-        b1 = corpus_bleu(list_of_references, hypotheses, weights=(1, 0, 0, 0), smoothing_function=chencherry.method1)
-        b2 = corpus_bleu(list_of_references, hypotheses, weights=(0.5, 0.5, 0, 0), smoothing_function=chencherry.method1)
-        b3 = corpus_bleu(list_of_references, hypotheses, weights=(0.33, 0.33, 0.33, 0), smoothing_function=chencherry.method1)
-        b4 = corpus_bleu(list_of_references, hypotheses, weights=(0.25, 0.25, 0.25, 0.25), smoothing_function=chencherry.method1)
-        
-        return {
-            "bleu": float(b4),
-            "bleu1": float(b1),
-            "bleu2": float(b2),
-            "bleu3": float(b3),
-            "bleu4": float(b4),
-        }
-
-    def calculate_rouge(self, candidates: List[str], references: List[str]) -> Dict:
-        """修改点 4: 使用 rouge-score 本地计算 (无需联网脚本)"""
-        all_scores = []
-        for cand, ref in zip(candidates, references):
-            score = self.rouge_evaluator.score(ref, cand)
-            all_scores.append(score)
-            
-        return {
-            "rouge1": float(np.mean([s['rouge1'].fmeasure for s in all_scores])),
-            "rouge2": float(np.mean([s['rouge2'].fmeasure for s in all_scores])),
-            "rougeL": float(np.mean([s['rougeL'].fmeasure for s in all_scores])),
-            "rougeLsum": float(np.mean([s['rougeLsum'].fmeasure for s in all_scores])),
-        }
-
-    def calculate_meteor(self, candidates: List[str], references: List[str]) -> Dict:
-        """离线环境下跳过 METEOR"""
-        return {"meteor": 0.0}
-
-    def calculate_bertscore(self, candidates: List[str], references: List[str]) -> Dict:
-        """计算 BERTScore (已修复本地路径导致的 KeyError)"""
-        # 获取本地模型路径
-        model_path = self.bert_model.config._name_or_path
-        
-        P, R, F1 = bert_score(
-            candidates,
-            references,
-            model_type=model_path, 
-            num_layers=17, # <--- 关键修改：手动指定 RoBERTa-Large 的推荐层数（17）
-            lang="en",
-            device=self.device,
-            verbose=False
+    def __init__(self):
+        self.rouge = rouge_scorer.RougeScorer(
+            ['rouge1', 'rouge2', 'rougeL', 'rougeLsum'], use_stemmer=True
         )
+        self.cider_scorer = Cider()
+        self.spice_scorer = Spice()
+
+    # ── BLEU-1/2/3/4 ─────────────────────────────────────────────────
+    def calculate_bleu(
+        self,
+        candidates: List[str],
+        references: List[List[str]],
+    ) -> Dict:
+        hyps = [c.split() for c in candidates]
+        refs = [[r.split() for r in rs] for rs in references]
+        sf   = SmoothingFunction()
         return {
-            "bertscore_p": float(P.mean().item()),
-            "bertscore_r": float(R.mean().item()),
-            "bertscore_f1": float(F1.mean().item()),
+            "bleu1": float(corpus_bleu(refs, hyps, weights=(1, 0, 0, 0),          smoothing_function=sf.method1)),
+            "bleu2": float(corpus_bleu(refs, hyps, weights=(.5, .5, 0, 0),        smoothing_function=sf.method1)),
+            "bleu3": float(corpus_bleu(refs, hyps, weights=(.33, .33, .33, 0),    smoothing_function=sf.method1)),
+            "bleu4": float(corpus_bleu(refs, hyps, weights=(.25, .25, .25, .25),  smoothing_function=sf.method1)),
         }
 
-    def calculate_t5_similarity(self, candidates: List[str], references: List[str]) -> Dict:
-        """计算 Sentence-T5 余弦相似度 (已指向本地模型)"""
-        candidate_embeds = self.t5_model.encode(candidates, normalize_embeddings=True)
-        reference_embeds = self.t5_model.encode(references, normalize_embeddings=True)
-        similarities = cosine_similarity(candidate_embeds, reference_embeds).diagonal()
-        cubed_similarities = np.abs(similarities ** 3)
-        return {
-            "t5_cosine_similarity": float(similarities.mean()),
-            "t5_cubed_similarity": float(cubed_similarities.mean()),
-        }
+    # ── METEOR ────────────────────────────────────────────────────────
+    def calculate_meteor(
+        self,
+        candidates: List[str],
+        references: List[List[str]],
+    ) -> Dict:
+        scores = [
+            meteor_score([r.split() for r in refs], cand.split())
+            for cand, refs in zip(candidates, references)
+        ]
+        return {"meteor": float(np.mean(scores))}
 
-    def calculate_caption_length(self, candidates: List[str]) -> Dict:
-        """计算 Caption 长度统计"""
-        lengths = [len(caption.split()) for caption in candidates]
-        return {
-            "avg_word_count": float(np.mean(lengths)),
-            "std_word_count": float(np.std(lengths)),
-            "min_word_count": int(np.min(lengths)),
-            "max_word_count": int(np.max(lengths)),
-        }
+    # ── ROUGE-L ───────────────────────────────────────────────────────
+    def calculate_rouge(
+        self,
+        candidates: List[str],
+        references: List[List[str]],
+    ) -> Dict:
+        rL = []
+        for cand, refs in zip(candidates, references):
+            best = max(self.rouge.score(ref, cand)['rougeL'].fmeasure for ref in refs)
+            rL.append(best)
+        return {"rougeL": float(np.mean(rL))}
 
+    # ── CIDEr ─────────────────────────────────────────────────────────
+    def calculate_cider(
+        self,
+        candidates: List[str],
+        references: List[List[str]],
+    ) -> Dict:
+        gts, res = _to_coco_fmt(candidates, references)
+        score, _ = self.cider_scorer.compute_score(gts, res)
+        return {"cider": float(score)}
+
+    # ── SPICE ─────────────────────────────────────────────────────────
+    def calculate_spice(
+        self,
+        candidates: List[str],
+        references: List[List[str]],
+    ) -> Dict:
+        gts, res = _to_coco_fmt(candidates, references)
+        try:
+            score, _ = self.spice_scorer.compute_score(gts, res)
+            return {"spice": float(score)}
+        except Exception as e:
+            logger.warning(f"SPICE 计算失败（需要 Java 环境）: {e}")
+            return {"spice": -1.0}
+
+    # ── 主评估入口 ────────────────────────────────────────────────────
     def evaluate(
         self,
         candidates: List[str],
-        references: List[str],
-        metrics: Optional[List[str]] = None
+        references: List[List[str]],
+        skip_spice: bool = False,
     ) -> Dict:
         if len(candidates) != len(references):
-            raise ValueError(f"Candidates count ({len(candidates)}) != references count ({len(references)})")
-
-        # --- 修改点 5: 默认指标移除 meteor ---
-        if not metrics:
-            metrics = ["bleu", "rouge", "bertscore", "t5_similarity", "length"]
-        # ----------------------------------
-
+            raise ValueError(
+                f"candidates({len(candidates)}) != references({len(references)})"
+            )
         results = {}
 
-        # 处理参考答案格式
-        references_for_bleu = [[ref] for ref in references]
-        references_flat = references
+        logger.info("Calculating BLEU-1/2/3/4...")
+        results.update(self.calculate_bleu(candidates, references))
 
-        if "bleu" in metrics:
-            logger.info("Calculating BLEU (NLTK Offline)...")
-            results.update(self.calculate_bleu(candidates, references_for_bleu))
+        logger.info("Calculating METEOR...")
+        results.update(self.calculate_meteor(candidates, references))
 
-        if "rouge" in metrics:
-            logger.info("Calculating ROUGE (Rouge-Score Offline)...")
-            results.update(self.calculate_rouge(candidates, references_flat))
+        logger.info("Calculating ROUGE-L...")
+        results.update(self.calculate_rouge(candidates, references))
 
-        if "bertscore" in metrics:
-            logger.info("Calculating BERTScore...")
-            results.update(self.calculate_bertscore(candidates, references_flat))
+        logger.info("Calculating CIDEr...")
+        results.update(self.calculate_cider(candidates, references))
 
-        if "t5_similarity" in metrics:
-            logger.info("Calculating T5 Similarity...")
-            results.update(self.calculate_t5_similarity(candidates, references_flat))
-
-        if "length" in metrics:
-            logger.info("Calculating Caption Length...")
-            results.update(self.calculate_caption_length(candidates))
+        if not skip_spice:
+            logger.info("Calculating SPICE (requires Java)...")
+            results.update(self.calculate_spice(candidates, references))
 
         return results
 
 
-def load_jsonl(file_path: str) -> List[Dict]:
-    with open(file_path, 'r', encoding='utf-8') as f:
-        return [json.loads(line) for line in f]
+# ── 结果打印 ──────────────────────────────────────────────────────────
+METRIC_DISPLAY_ORDER = ["bleu1", "bleu2", "bleu3", "bleu4", "meteor", "rougeL", "cider", "spice"]
 
-def load_json(file_path: str) -> List[Dict]:
-    with open(file_path, 'r', encoding='utf-8') as f:
+METRIC_LABELS = {
+    "bleu1":  "BLEU-1 ",
+    "bleu2":  "BLEU-2 ",
+    "bleu3":  "BLEU-3 ",
+    "bleu4":  "BLEU-4 ",
+    "meteor": "METEOR ",
+    "rougeL": "ROUGE-L",
+    "cider":  "CIDEr  ",
+    "spice":  "SPICE  ",
+}
+
+
+def print_results(results: Dict) -> None:
+    sep = "=" * 35
+    logger.info("\n" + sep)
+    logger.info("  Evaluation Results")
+    logger.info(sep)
+    for k in METRIC_DISPLAY_ORDER:
+        if k not in results:
+            continue
+        v     = results[k]
+        label = METRIC_LABELS.get(k, k)
+        if v < 0:
+            logger.info(f"  {label} : NA")
+        else:
+            logger.info(f"  {label} : {v:.4f}")
+    logger.info(sep)
+
+
+# ── 文件加载 ──────────────────────────────────────────────────────────
+def load_jsonl(path):
+    with open(path, encoding="utf-8") as f:
+        return [json.loads(l) for l in f if l.strip()]
+
+def load_json(path):
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
+def extract_gpt_caption(item: dict, reference_key: str) -> str:
+    val = item.get(reference_key, "")
+    if isinstance(val, list):
+        return next((m["value"] for m in val if m.get("from") == "gpt"), "")
+    return str(val)
 
+
+# ── CLI ───────────────────────────────────────────────────────────────
 def main():
-    parser = argparse.ArgumentParser(description="通用 Caption 评估工具 (本地版)")
+    parser = argparse.ArgumentParser(
+        description="Caption 评估 — BLEU-1/2/3/4, METEOR, ROUGE-L, CIDEr, SPICE"
+    )
     parser.add_argument("--prediction_file", type=str, required=True)
-    parser.add_argument("--reference_file", type=str, required=True)
-    parser.add_argument("--output_file", type=str, default="evaluation_results.json")
-    parser.add_argument("--prediction_key", type=str, default="prediction")
-    parser.add_argument("--reference_key", type=str, default="conversations") # 默认设为 conversations
-    parser.add_argument("--id_key", type=str, default="id")
-    parser.add_argument("--t5_model_path", type=str, default=None)
-    parser.add_argument("--bert_model_path", type=str, default=None)
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-
+    parser.add_argument("--reference_file",  type=str, default=None)
+    parser.add_argument("--output_file",     type=str, default="evaluation_results.json")
+    parser.add_argument("--prediction_key",  type=str, default="prediction")
+    parser.add_argument("--reference_key",   type=str, default="conversations")
+    parser.add_argument("--id_key",          type=str, default="id")
+    parser.add_argument("--skip_spice",      action="store_true",
+                        help="跳过 SPICE（无 Java 环境时使用）")
     args = parser.parse_args()
 
-    logger.info("=" * 60)
-    logger.info("Caption Evaluation Tool (Offline Stable)")
-    logger.info("=" * 60)
+    preds = (load_jsonl if args.prediction_file.endswith(".jsonl")
+             else load_json)(args.prediction_file)
 
-    if args.prediction_file.endswith(".jsonl"):
-        predictions = load_jsonl(args.prediction_file)
+    # ── 构建参考答案字典 ──────────────────────────────────────────────
+    ref_dict: Dict[str, List[str]] = defaultdict(list)
+
+    if args.reference_file is None:
+        logger.info("单文件模式：从 prediction_file 的 conversations 字段读取参考答案")
+        for item in preds:
+            caption = extract_gpt_caption(item, args.reference_key)
+            if caption:
+                ref_dict[item[args.id_key]].append(caption)
     else:
-        predictions = load_json(args.prediction_file)
+        logger.info(f"双文件模式：从 {args.reference_file} 读取参考答案")
+        refs = (load_jsonl if args.reference_file.endswith(".jsonl")
+                else load_json)(args.reference_file)
+        for ref in refs:
+            caption = extract_gpt_caption(ref, args.reference_key)
+            if caption:
+                ref_dict[ref[args.id_key]].append(caption)
 
-    if args.reference_file.endswith(".jsonl"):
-        references = load_jsonl(args.reference_file)
-    else:
-        references = load_json(args.reference_file)
-
-    # --- 修改点 6: 修正参考答案的解析逻辑 (处理 conversations 列表) ---
-    ref_dict = {}
-    for ref in references:
-        val = ref[args.reference_key]
-        if isinstance(val, list):
-            # 找到 gpt 的回复
-            caption = next((m["value"] for m in val if m.get("from") == "gpt"), "")
-            ref_dict[ref[args.id_key]] = caption
-        else:
-            ref_dict[ref[args.id_key]] = str(val)
-    # -------------------------------------------------------------
-
-    candidate_list = []
-    reference_list = []
-    for pred in predictions:
-        sample_id = pred[args.id_key]
-        if sample_id in ref_dict:
+    # ── 对齐预测与参考 ────────────────────────────────────────────────
+    candidate_list, reference_list = [], []
+    for pred in preds:
+        sid = pred[args.id_key]
+        if sid in ref_dict:
             candidate_list.append(pred[args.prediction_key])
-            reference_list.append(ref_dict[sample_id])
+            reference_list.append(ref_dict[sid])
 
     logger.info(f"Matched {len(candidate_list)} samples")
 
-    evaluator = CaptionEvaluator(
-        t5_model_path=args.t5_model_path,
-        bert_model_path=args.bert_model_path,
-        device=args.device
+    # ── 评估 ──────────────────────────────────────────────────────────
+    evaluator = CaptionEvaluator()
+    results   = evaluator.evaluate(
+        candidate_list,
+        reference_list,
+        skip_spice=args.skip_spice,
     )
 
-    results = evaluator.evaluate(candidate_list, reference_list)
+    # ── 打印结果 ──────────────────────────────────────────────────────
+    print_results(results)
 
-    # 输出结果
-    for key, value in results.items():
-        logger.info(f"{key:25s}: {value:.4f}" if isinstance(value, float) else f"{key:25s}: {value}")
-
-    with open(args.output_file, 'w', encoding='utf-8') as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
+    # ── 保存结果：使用 RoundedFloatEncoder 保证四位小数 ──────────────
+    with open(args.output_file, "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2, ensure_ascii=False, cls=RoundedFloatEncoder)
+    logger.info(f"Results saved to: {args.output_file}")
 
 
 if __name__ == "__main__":
