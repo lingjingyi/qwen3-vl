@@ -2,3 +2,4 @@ pretrained/
 logs/
 checkpoints/
 output/
+cache/

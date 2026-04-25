@@ -638,35 +638,35 @@ class FlattenedDataCollatorForSupervisedDataset(DataCollatorForSupervisedDataset
 def make_supervised_data_module(
     tokenizer: transformers.PreTrainedTokenizer,
     data_args,
-    val_ratio: float = 0.1,
+    val_ratio: float = 0.0,   # ★ 0.1 → 0.0, 全量训练冲分数
     seed: int = 42,
 ) -> Dict:
     """
-    构建训练/验证数据模块。
-    val_ratio=0.1：从全量数据中划出 10% 作为验证集，
-    固定随机种子保证每次划分一致，可通过 eval_loss 监控过拟合。
+    构建训练/验证数据模块.
 
-    对应 TrainingArguments 建议配置：
-      --evaluation_strategy  steps
-      --eval_steps           50
-      --load_best_model_at_end true
-      --metric_for_best_model eval_loss
+    val_ratio=0.0 (默认): 全量训练, 不留 val set, 最大化数据利用率.
+    val_ratio>0        : 按比例划分 val set (原行为, 用于监控过拟合).
     """
     full_dataset = LazySupervisedDataset(tokenizer=tokenizer, data_args=data_args)
 
-    total      = len(full_dataset)
-    val_size   = max(1, int(total * val_ratio))
-    train_size = total - val_size
+    total = len(full_dataset)
 
-    # 固定随机种子，保证每次划分一致
-    generator = torch.Generator().manual_seed(seed)
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        full_dataset, [train_size, val_size], generator=generator
-    )
-    rank0_print(
-        f"[Split] total={total}, train={train_size}, "
-        f"val={val_size} (val_ratio={val_ratio})"
-    )
+    if val_ratio > 0:
+        val_size   = max(1, int(total * val_ratio))
+        train_size = total - val_size
+        generator  = torch.Generator().manual_seed(seed)
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            full_dataset, [train_size, val_size], generator=generator
+        )
+        rank0_print(
+            f"[Split] total={total}, train={train_size}, "
+            f"val={val_size} (val_ratio={val_ratio})"
+        )
+    else:
+        # ★ 全量训练, 无 val set
+        train_dataset = full_dataset
+        val_dataset   = None
+        rank0_print(f"[Split] total={total}, 全量训练 (val_ratio=0)")
 
     if data_args.data_flatten:
         data_collator = FlattenedDataCollatorForSupervisedDataset(tokenizer=tokenizer)
@@ -675,7 +675,7 @@ def make_supervised_data_module(
 
     return dict(
         train_dataset=train_dataset,
-        eval_dataset=val_dataset,       # 原来是 None，现在返回验证集
+        eval_dataset=val_dataset,       # None 时 HF Trainer 自动跳过 eval
         data_collator=data_collator,
     )
 

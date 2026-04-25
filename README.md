@@ -124,7 +124,7 @@ bash scripts/sft.sh
 ```
 
 ## 关键参数说明
-
+ 
 ### 模型微调控制
 
 | 参数 | 说明 | 推荐值 |
@@ -179,7 +179,7 @@ python inference/generate_caption.py \
 
 cd /opt/data/private/qwen3-vl-master/qwen3-vl/  # 回到项目根目录
 python inference/generate_caption.py \
-    --model_path /opt/data/private/qwen3-vl-master/qwen3-vl/checkpoints/qwen3vl_caption/merged_model \
+    --model_path /opt/data/private/qwen3-vl-master/qwen3-vl/output/qwen3vl_lora/merged_model \
     --input_file /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/test_dataset.jsonl \
     --output_file /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/predictions.jsonl \
     --image_key images \
@@ -188,9 +188,9 @@ python inference/generate_caption.py \
     --max_new_tokens 512
 
 python inference/generate_caption.py \
-    --model_path /opt/data/private/qwen3-vl-master/qwen3-vl/checkpoints/qwen3vl_caption/merged_model \
-    --input_file /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/test_dataset.jsonl \
-    --output_file /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/predictions.jsonl \
+    --model_path /opt/data/private/qwen3-vl-master/qwen3-vl/output/qwen3vl_lora/merged_model \
+    --input_file /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/rsgpt_test.jsonl \
+    --output_file /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/rsgpt_predictions.jsonl \
     --num_beams 8 \
     --length_penalty 1.2 \
     --min_new_tokens 40 \
@@ -250,9 +250,9 @@ python evaluation/evaluate_caption.py \
     
 缺失库需要安装：pip install nltk rouge_score sentence-transformers bert_score -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-python evaluation/evaluate_caption.py \
-    --prediction_file /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/predictions.jsonl \
-    --output_file /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/evaluation_results.json 
+python evaluation/evaluate_caption2.py \
+    --prediction_file /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/rsgpt_predictions.jsonl \
+    --output_file /opt/data/private/qwen3-vl-master/qwen3-vl/dataset/rsgpt_evaluation_results.json 
 
 ### 评估指标
 

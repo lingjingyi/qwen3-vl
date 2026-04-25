@@ -13,15 +13,23 @@ UNIVERSITY_CROSSVIEW_DATASET = {
     "data_path": "",  # 标注文件中已使用绝对路径
 }
 
-YOUR_CAPTION_DATASET = {
-    "annotation_path": "/path/to/your_captions.jsonl",
-    "data_path": "/path/to/images",
+# RSGPT 图像描述数据集
+# 使用前请先运行 convert_rsgpt.py 生成 rsgpt_train.jsonl
+RSGPT_CAPTION_DATASET = {
+    "annotation_path": "/opt/data/private/qwen3-vl-master/qwen3-vl/dataset/rsgpt_train.jsonl",
+    "data_path": "",  # convert_rsgpt.py 已写入绝对路径
+}
+
+RSGPT_CAPTION_DATASET_ALIGNED = {
+    "annotation_path": "/opt/data/private/qwen3-vl-master/qwen3-vl/dataset/rsgpt_train_aligned.jsonl",  # 指向重写后的文件
+    "data_path": "",  # 和原来一样
 }
 
 data_dict = {
     "train_dataset": UNIVERSITY_CROSSVIEW_DATASET,
     "university_crossview": UNIVERSITY_CROSSVIEW_DATASET,
-    "your_caption_dataset": YOUR_CAPTION_DATASET,
+    "rsgpt_train": RSGPT_CAPTION_DATASET,
+    "rsgpt_train_aligned": RSGPT_CAPTION_DATASET_ALIGNED,
 }
 
 
@@ -36,24 +44,31 @@ def data_list(dataset_names):
     config_list = []
     for dataset_name in dataset_names:
         sampling_rate = parse_sampling_rate(dataset_name)
-        dataset_name = re.sub(r"%(\d+)$", "", dataset_name)
-        if dataset_name in data_dict.keys():
+        dataset_name  = re.sub(r"%(\d+)$", "", dataset_name)
+        if dataset_name in data_dict:
             config = data_dict[dataset_name].copy()
             config["sampling_rate"] = sampling_rate
             config_list.append(config)
         else:
-            raise ValueError(f"do not find {dataset_name}")
+            raise ValueError(
+                f"Dataset '{dataset_name}' not found. "
+                f"Available: {list(data_dict.keys())}"
+            )
     return config_list
 
 
 if __name__ == "__main__":
-    dataset_names = ["university_crossview%100"]
+    import os
+
+    # 可改为 "rsgpt_caption%100" 单独验证 RSGPT，或混合使用
+    dataset_names = ["university_crossview%100", "rsgpt_caption%100, rsgpt_train_aligned%100"]
     configs = data_list(dataset_names)
+
     for config in configs:
         print(config)
-        import os
-
         if not os.path.exists(config["annotation_path"]):
             raise FileNotFoundError(
                 f"Annotation file not found: {config['annotation_path']}"
             )
+        else:
+            print(f"  ✅ 文件存在: {config['annotation_path']}")
